@@ -1,0 +1,148 @@
+rules <-> skip (grammar_rule / binary_rule)+ code? skip `{__2, __3}`;
+
+skip <- (SPACE / comment)*;
+
+comment <- "%" COMMENT_CHAR "\n";
+
+grammar_rule <-
+    ":"? lower_rule_name skip "<-" IS_ENTER_RULE
+    skip grammar_rule_define skip code? skip ";" skip
+`{__2, {__1 =/= [], __5}, __7, __9}`;
+
+lower_rule_name <- LOWER_CHAR ATOM?
+`{grammar, binary_to_atom(iolist_to_binary([__1, __2]), utf8)}`;
+
+grammar_rule_define <- choise / seq;
+
+binary_rule <-
+    ":"? upper_rule_name skip "<" HAS_CONTINUE IS_ENTER_RULE skip
+    binary_rule_define skip code? skip ";" skip
+`{__2, {__1 =/= [], __5, __6}, __8, __10}`;
+
+upper_rule_name <- UPPER_CHAR ATOM?
+`{binary, binary_to_atom(iolist_to_binary([__1, __2]), utf8)}`;
+
+binary_rule_define <- chars SUFFIX? `{repeat, __2, __1}`;
+
+choise <-  seq (skip "/" skip seq)+
+`{choise, [__1 | [ E || [_, _, _, E] <- __2 ]]}`;
+
+seq <- atomic (skip atomic)* `{seq, [__1 | [E || [_, E] <- __2]]}`;
+
+atomic <- PREFIX? value SUFFIX? `{__1, __2, __3}`;
+
+value <- rule_name / string / chars / any / parentheses;
+
+rule_name <- remote? (upper_rule_name / lower_rule_name)
+`case __1 of [] -> {local, __2}; Remote -> {remote, Remote, __2} end`;
+
+remote <- ATOM ":" `binary_to_atom(__1, utf8)`;
+
+string <- "\"" STRING_CHAR ("\\" . STRING_CHAR)* "\"" "i"? `
+    String = binary_to_list(iolist_to_binary([$", __2, __3, $"])),
+    {ok, [{string, _, RealString}], _} = erl_scan:string(String),
+    {string, __5 =/= [], RealString}
+`;
+
+chars <- "[" CHARS_CHAR ("\\" . CHARS_CHAR)* "]" `
+    case __2
+    of <<$^, Rest/binary>> ->
+        NotChars = chars(iolist_to_binary([Rest, __3]), []),
+        {chars, not_chars(NotChars)}
+    ; _ ->
+        {chars, chars(iolist_to_binary([__2, __3]), [])}
+    end
+`;
+
+any <- "." `any`;
+
+parentheses <- "(" skip? grammar_rule_define skip? ")" `__3`;
+
+code <- CODE_BEGIN_CHAR CODE_CHAR ("\\" . CODE_CHAR)* CODE_BEGIN_CHAR
+`{__1, iolist_to_binary([__2, __3])}`;
+
+SPACE <- [ \t\r\n]+;
+
+COMMENT_CHAR <- [^\n]*;
+
+LOWER_CHAR <- [a-z];
+
+UPPER_CHAR <- [A-Z];
+
+ATOM <- [a-zA-Z0-9@_]+;
+
+HAS_CONTINUE <- [-~] `__1 == <<"~">>`;
+
+IS_ENTER_RULE <- [>]? `__1 =/= <<>>`;
+
+PREFIX <- [&!];
+
+SUFFIX <- [+*?] `binary_to_atom(__1, utf8)`;
+
+% all except \, " and control char
+STRING_CHAR <- [ !#-[\]^-~\x7F-\xFF]*;
+
+CHARS_CHAR <- [ !-[^-~]*;
+
+CODE_CHAR <- [^`\\]*;
+
+CODE_BEGIN_CHAR <- [`] `__L`;
+
+`
+% Encoded char
+chars(<<$\\, $x, Hi, Lo, Tail/binary>>, Chars) ->
+    Char = list_to_integer([Hi, Lo], 16),
+    range(Tail, Char, Chars);
+chars(<<$\\, $t, Tail/binary>>, Chars) ->
+    range(Tail, $\t, Chars);
+chars(<<$\\, $s, Tail/binary>>, Chars) ->
+    range(Tail, $\s, Chars);
+chars(<<$\\, $r, Tail/binary>>, Chars) ->
+    range(Tail, $\r, Chars);
+chars(<<$\\, $n, Tail/binary>>, Chars) ->
+    range(Tail, $\n, Chars);
+chars(<<$\\, $\\, Tail/binary>>, Chars) ->
+    range(Tail, $\\, Chars);
+chars(<<$\\, $], Tail/binary>>, Chars) ->
+    range(Tail, $], Chars);
+% Simple char
+chars(<<A, Tail/binary>>, Chars) ->
+    range(Tail, A, Chars);
+chars(<<>>, Chars) ->
+    lists:sort(Chars).
+
+% Encoded char
+range(<<"-", $\\, $x, Hi, Lo, Tail/binary>>, BeginChar, Chars) ->
+    EndChar = list_to_integer([Hi, Lo], 16),
+    chars(Tail, lists:seq(BeginChar, EndChar) ++ Chars);
+range(<<"-", $\\, $t, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $\t) ++ Chars);
+range(<<"-", $\\, $s, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $\s) ++ Chars);
+range(<<"-", $\\, $r, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $\r) ++ Chars);
+range(<<"-", $\\, $n, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $\n) ++ Chars);
+range(<<"-", $\\, $\\, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $\\) ++ Chars);
+range(<<"-", $\\, $], Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, $]) ++ Chars);
+range(<<"-", $\\, End, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, End) ++ Chars);
+% Simple char
+range(<<"-", End, Tail/binary>>, BeginChar, Chars) ->
+    chars(Tail, lists:seq(BeginChar, End) ++ Chars);
+% Not range
+range(Tail, Char, Chars) ->
+    chars(Tail, [Char | Chars]).
+
+not_chars(NotChars) ->
+    not_chars(lists:seq(0, 255), NotChars).
+
+not_chars([X | Tail], [X | NotCharsTail]) ->
+    not_chars(Tail, NotCharsTail);
+not_chars([X | Tail], NotChars) ->
+    [X | not_chars(Tail, NotChars)];
+not_chars([], []) ->
+    [].
+`
